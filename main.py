@@ -1,22 +1,71 @@
 import win32com.client
 import re
 import pandas as pd
-from openpyxl import load_workbook
+from openpyxl import load_workbook, Workbook
 import os
 from datetime import datetime, timedelta
 import time
 import pythoncom
+import sys
+import logging
+
+# === Настройка логирования ===
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler("script.log", encoding='utf-8'),
+        logging.StreamHandler(sys.stdout)
+    ]
+)
 
 # === Настройки ===
 OUTLOOK_FOLDER = "Inbox"
 SEARCH_SUBJECT = "Возврат поддонов из сетей"
-EXCEL_FILE = r"C:\Users\legki\Desktop\test.xlsx"
+EXCEL_FILE = os.path.join(os.path.expanduser("~"), "Desktop", "возврат_поддонов.xlsx")
+PROCESSED_IDS_FILE = "processed_ids.txt"
 SHEET_NAME = "Данные"
+
+# ✅ МЕНЯЙ ЗДЕСЬ: "vertical" или "horizontal"
+WRITE_MODE = "horizontal"
 
 EMAIL_TO = "skoppss@yandex.ru"
 EMAIL_CC = "legkiy.a@inbox.eu"
 
-processed_ids = set()
+
+# === Загрузка уже обработанных ID из файла ===
+def load_processed_ids():
+    if not os.path.exists(PROCESSED_IDS_FILE):
+        return set()
+    try:
+        with open(PROCESSED_IDS_FILE, "r", encoding="utf-8") as f:
+            return set(line.strip() for line in f if line.strip())
+    except Exception as e:
+        logging.error(f"Ошибка загрузки processed_ids: {e}")
+        return set()
+
+
+# === Сохранение обработанных ID в файл ===
+def save_processed_ids(ids):
+    try:
+        with open(PROCESSED_IDS_FILE, "w", encoding="utf-8") as f:
+            for item_id in ids:
+                f.write(item_id + "\n")
+    except Exception as e:
+        logging.error(f"Ошибка сохранения processed_ids: {e}")
+
+
+# === Проверка, есть ли письмо уже в Excel (по EntryID) ===
+def is_email_in_excel(entry_id):
+    if not os.path.exists(EXCEL_FILE):
+        return False
+    try:
+        df = pd.read_excel(EXCEL_FILE, sheet_name=SHEET_NAME)
+        if "EntryID" in df.columns and entry_id in df["EntryID"].values:
+            return True
+    except Exception as e:
+        logging.debug(f"Ошибка проверки Excel: {e}")
+    return False
 
 
 # === Парсинг письма ===
@@ -34,7 +83,8 @@ def parse_email(body, received_time):
             "Номер ВУ": "",
             "Телефон": "",
             "ИНН": "",
-            "Доп. информация": ""
+            "Доп. информация": "",
+            "EntryID": ""
         }
 
         for line in lines:
@@ -68,57 +118,145 @@ def parse_email(body, received_time):
         return data
 
     except Exception as e:
-        print("Ошибка парсинга письма:", e)
+        logging.error(f"Ошибка парсинга письма: {e}")
         return None
 
 
 # === Отправка уведомления ===
 def send_email(subject, body, to, cc=None):
-    outlook_app = win32com.client.Dispatch("Outlook.Application")
-    mail = outlook_app.CreateItem(0)
-    mail.Subject = subject
-    mail.To = to
-    if cc:
-        mail.CC = cc
-    mail.Body = body
-    mail.Send()
-    print(f"Отправлено уведомление: {subject} -> {to}")
+    try:
+        outlook_app = win32com.client.Dispatch("Outlook.Application")
+        mail = outlook_app.CreateItem(0)
+        mail.Subject = subject
+        mail.To = to
+        if cc:
+            mail.CC = cc
+        mail.Body = body
+        mail.Send()
+        logging.info(f"Отправлено уведомление: {subject} -> {to}")
+        del mail
+        del outlook_app
+    except Exception as e:
+        logging.error(f"Ошибка отправки email: {e}")
+
+
+# === Запись в Excel: вертикальный режим ===
+def write_vertical_to_excel(data, sheet_name, excel_file):
+    try:
+        if not os.path.exists(excel_file):
+            wb = Workbook()
+            ws = wb.active
+            ws.title = sheet_name
+            ws.append(["Ключ", "Значение", "EntryID"])
+            wb.save(excel_file)
+            logging.info(f"✅ Создан новый файл Excel (вертикальный): {excel_file}")
+
+        book = load_workbook(excel_file)
+
+        if sheet_name not in book.sheetnames:
+            ws = book.create_sheet(sheet_name)
+            ws.append(["Ключ", "Значение", "EntryID"])
+        else:
+            ws = book[sheet_name]
+
+        startrow = ws.max_row + 1
+
+        ws.cell(row=startrow, column=1, value=f"=== Письмо от {data['Дата письма']} ===")
+        ws.cell(row=startrow, column=3, value=data["EntryID"])
+        startrow += 1
+
+        for key, value in data.items():
+            if key == "EntryID":
+                continue
+            ws.cell(row=startrow, column=1, value=key)
+            ws.cell(row=startrow, column=2, value=value)
+            ws.cell(row=startrow, column=3, value=data["EntryID"])
+            startrow += 1
+
+        book.save(excel_file)
+        logging.info("✅ Данные успешно записаны в Excel (вертикально)")
+
+    except Exception as e:
+        logging.error(f"❌ Ошибка записи в Excel (вертикально): {e}")
+
+
+# === ✅ ИСПРАВЛЕНО: Запись в Excel: горизонтальный режим (создаёт файл, если его нет) ===
+def write_horizontal_to_excel(data, sheet_name, excel_file):
+    try:
+        df_new = pd.DataFrame([data])
+
+        if not os.path.exists(excel_file):
+            # Создаём файл с заголовками и первой строкой
+            df_new.to_excel(excel_file, sheet_name=sheet_name, index=False)
+            logging.info(f"✅ Создан новый файл Excel (горизонтальный): {excel_file}")
+        else:
+            # Открываем существующий файл
+            book = load_workbook(excel_file)
+
+            if sheet_name not in book.sheetnames:
+                # Создаём лист и записываем с заголовками
+                with pd.ExcelWriter(excel_file, engine="openpyxl", mode="a") as writer:
+                    df_new.to_excel(writer, sheet_name=sheet_name, index=False)
+                logging.info("✅ Создан новый лист и записаны данные")
+            else:
+                # Дописываем без заголовков
+                startrow = book[sheet_name].max_row
+                with pd.ExcelWriter(excel_file, engine="openpyxl", mode="a", if_sheet_exists="overlay") as writer:
+                    df_new.to_excel(writer, sheet_name=sheet_name, index=False, header=False, startrow=startrow)
+                logging.info("✅ Данные дописаны в существующий лист")
+
+    except Exception as e:
+        logging.error(f"❌ Ошибка записи в Excel (горизонтально): {e}")
 
 
 # === Обработка письма ===
-def handle_mail(item):
+def handle_mail(item, processed_ids):
     try:
-        if item.EntryID in processed_ids:
-            return
-        if not item.Subject or SEARCH_SUBJECT not in str(item.Subject):
+        entry_id = item.EntryID
+        subject = item.Subject
+        received_time = item.ReceivedTime
+        received_time_str = received_time.strftime("%Y-%m-%d %H:%M")
+
+        logging.info(f"🔍 Начинаем обработку письма: {subject} | ID: {entry_id}")
+
+        if entry_id in processed_ids:
+            logging.debug("❌ Пропускаем: уже в processed_ids")
             return
 
-        data = parse_email(item.Body, item.ReceivedTime)
+        if is_email_in_excel(entry_id):
+            logging.debug("❌ Пропускаем: уже есть в Excel")
+            processed_ids.add(entry_id)
+            save_processed_ids(processed_ids)
+            return
+
+        if not subject or SEARCH_SUBJECT not in str(subject):
+            logging.debug("❌ Пропускаем: тема не совпадает")
+            return
+
+        body = item.Body
+        del item
+
+        data = parse_email(body, received_time)
         if not data:
-            processed_ids.add(item.EntryID)
+            logging.warning("⚠️ Не удалось распарсить письмо")
+            processed_ids.add(entry_id)
+            save_processed_ids(processed_ids)
             return
 
-        print("Извлечено:", data)
+        data["EntryID"] = entry_id
+        logging.info(f"✅ Извлечено: {data}")
 
         # === Запись в Excel ===
-        df_new = pd.DataFrame([data])
-        if not os.path.exists(EXCEL_FILE):
-            df_new.to_excel(EXCEL_FILE, sheet_name=SHEET_NAME, index=False)
+        if WRITE_MODE == "vertical":
+            write_vertical_to_excel(data, SHEET_NAME, EXCEL_FILE)
+            logging.info("✅ Записано вертикально в Excel")
         else:
-            book = load_workbook(EXCEL_FILE)
-            if SHEET_NAME not in book.sheetnames:
-                with pd.ExcelWriter(EXCEL_FILE, engine="openpyxl", mode="a") as writer:
-                    df_new.to_excel(writer, sheet_name=SHEET_NAME, index=False)
-            else:
-                startrow = book[SHEET_NAME].max_row
-                with pd.ExcelWriter(EXCEL_FILE, engine="openpyxl", mode="a", if_sheet_exists="overlay") as writer:
-                    df_new.to_excel(writer, sheet_name=SHEET_NAME, index=False,
-                                    header=False, startrow=startrow)
+            write_horizontal_to_excel(data, SHEET_NAME, EXCEL_FILE)
+            logging.info("✅ Записано горизонтально в Excel")
 
         # === Уведомление для Тандер ===
-        if data.get("Сеть", "").lower() == "тандер" and "Дата письма" in data:
+        if data.get("Сеть", "").lower() == "тандер":
             try:
-                return_date = datetime.strptime(data["Дата письма"], "%Y-%m-%d %H:%M")
                 today_date = datetime.today()
                 notify_days = [today_date]
 
@@ -126,7 +264,7 @@ def handle_mail(item):
                     notify_days = [today_date + timedelta(days=i) for i in [1, 2, 3]]
 
                 for notify_day in notify_days:
-                    subject = f"Напоминание: заказать пропуск на РЦ для Тандер"
+                    subject_msg = f"Напоминание: заказать пропуск на РЦ для Тандер"
                     body_msg = (
                         f"Дата возврата: {data['Дата письма']}\n"
                         f"Сеть: {data['Сеть']}\n"
@@ -135,47 +273,90 @@ def handle_mail(item):
                         f"Прицеп: {data.get('Прицеп','')}\n"
                         f"Не забудьте заказать пропуск на РЦ!"
                     )
-                    send_email(subject, body_msg, EMAIL_TO, EMAIL_CC)
+                    send_email(subject_msg, body_msg, EMAIL_TO, EMAIL_CC)
+                    logging.info("✅ Отправлено уведомление для Тандер")
             except Exception as e:
-                print("Ошибка при отправке уведомления:", e)
+                logging.error(f"Ошибка при отправке уведомления: {e}")
 
-        processed_ids.add(item.EntryID)
+        processed_ids.add(entry_id)
+        save_processed_ids(processed_ids)
+
     except Exception as e:
-        print("Ошибка обработки письма:", e)
+        logging.error(f"❌ Ошибка обработки письма: {e}")
+    finally:
+        if 'item' in locals():
+            del item
 
 
 # === Основной цикл мониторинга ===
 def monitor_inbox():
     pythoncom.CoInitialize()
+    outlook = None
+    namespace = None
+    inbox = None
+    folder = None
+
+    processed_ids = load_processed_ids()
+    logging.info(f"Загружено {len(processed_ids)} обработанных писем из файла.")
+
     try:
-        outlook = win32com.client.GetActiveObject("Outlook.Application")
-    except Exception:
-        print("Не удалось подключиться к открытому Outlook. Запустите Outlook и войдите в аккаунт.")
-        return
+        outlook = win32com.client.Dispatch("Outlook.Application")
+        namespace = outlook.GetNamespace("MAPI")
+        inbox = namespace.GetDefaultFolder(6)
+        folder = inbox.Folders[OUTLOOK_FOLDER] if OUTLOOK_FOLDER.lower() != "inbox" else inbox
 
-    namespace = outlook.GetNamespace("MAPI")
-    inbox = namespace.GetDefaultFolder(6)
-    folder = inbox.Folders[OUTLOOK_FOLDER] if OUTLOOK_FOLDER.lower() != "inbox" else inbox
+        logging.info(f"✅ Мониторинг запущен. Режим записи: {WRITE_MODE.upper()}.")
 
-    print("Мониторинг запущен. Будут обрабатываться только письма за сегодня.")
+        while True:
+            try:
+                today = datetime.today().date()
+                messages = folder.Items
+                messages.Sort("[ReceivedTime]", True)
 
-    while True:
-        try:
-            today = datetime.today().date()
-            messages = folder.Items
-            messages.Sort("[ReceivedTime]", True)
+                msg_list = []
+                for msg in messages:
+                    try:
+                        if getattr(msg, 'Class', None) != 43:
+                            continue
+                    except:
+                        continue
 
-            for msg in messages:
-                if msg.ReceivedTime.date() < today:
-                    break
-                handle_mail(msg)
+                    try:
+                        if msg.ReceivedTime.date() < today:
+                            break
+                    except:
+                        continue
 
-        except Exception as e:
-            print("Ошибка мониторинга:", e)
+                    msg_list.append(msg)
 
-        print("Ждем 300 секунд до следующей проверки...\n")
-        time.sleep(60)
+                logging.info(f"📬 Найдено {len(msg_list)} писем. Начинаем обработку...")
+
+                for msg in msg_list:
+                    handle_mail(msg, processed_ids)
+                    del msg
+
+                del msg_list
+
+            except Exception as e:
+                logging.error(f"❌ Ошибка мониторинга: {e}")
+
+            logging.info("⏳ Ждем 60 секунд до следующей проверки...\n")
+            time.sleep(60)
+
+    except Exception as e:
+        logging.error(f"❌ Ошибка инициализации Outlook: {e}")
+    finally:
+        for obj in [folder, inbox, namespace, outlook]:
+            if obj:
+                del obj
+        pythoncom.CoUninitialize()
 
 
+# === Запуск ===
 if __name__ == "__main__":
-    monitor_inbox()
+    try:
+        monitor_inbox()
+    except Exception as e:
+        logging.error(f"❌ Критическая ошибка: {e}")
+    finally:
+        input("\nНажмите Enter для закрытия...")
