@@ -12,15 +12,13 @@ import logging
 # === Определяем базовую папку (где лежит .exe или .py) ===
 def get_base_path():
     if getattr(sys, 'frozen', False):
-        # Если запущен как .exe (PyInstaller)
         return os.path.dirname(sys.executable)
     else:
-        # Если запущен как .py
         return os.path.dirname(os.path.abspath(__file__))
 
 BASE_PATH = get_base_path()
 
-# === Настройка логирования — лог в папке с программой ===
+# === Настройка логирования ===
 log_file = os.path.join(BASE_PATH, "script.log")
 logging.basicConfig(
     level=logging.INFO,
@@ -32,16 +30,29 @@ logging.basicConfig(
 )
 
 # === Настройки ===
-OUTLOOK_FOLDER = "Inbox"  # ← МЕНЯЙ, если письма в другой папке
+OUTLOOK_FOLDER = "Inbox"
 SEARCH_SUBJECT = "Возврат поддонов из сетей"
 EXCEL_FILE = os.path.join(BASE_PATH, "возврат_поддонов.xlsx")
 PROCESSED_IDS_FILE = os.path.join(BASE_PATH, "processed_ids.txt")
 SHEET_NAME = "Данные"
 
-WRITE_MODE = "horizontal"  # или "vertical"
+WRITE_MODE = "horizontal"
 
-EMAIL_TO = "skoppss@yandex.ru"
-EMAIL_CC = "legkiy.a@inbox.eu"
+# === Получатели напоминаний (можно вынести в конфиг позже) ===
+# REMINDER_RECIPIENTS = {
+#    "x5": ["dma@line7.ru", "slon07@line7.ru", "rudcekb@nestlesoft.net"],
+#    "тандер": ["rudcekb@nestlesoft.net"],
+#    "дистры": ["rudcekb@nestlesoft.net"]
+# }
+
+REMINDER_RECIPIENTS = {
+    "x5": ["skoppss@yandex.ru"],
+    "тандер": ["skoppss@yandex.ru"],
+    "дистры": ["skoppss@yandex.ru"]
+}
+
+# === Служебные переменные для отслеживания отправленных напоминаний ===
+sent_reminders = set()  # Хранит (entry_id, тип_напоминания)
 
 
 # === Загрузка уже обработанных ID из файла ===
@@ -139,7 +150,10 @@ def send_email(subject, body, to, cc=None):
         outlook_app = win32com.client.Dispatch("Outlook.Application")
         mail = outlook_app.CreateItem(0)
         mail.Subject = subject
-        mail.To = to
+        if isinstance(to, list):
+            mail.To = ";".join(to)
+        else:
+            mail.To = to
         if cc:
             mail.CC = cc
         mail.Body = body
@@ -149,6 +163,98 @@ def send_email(subject, body, to, cc=None):
         del outlook_app
     except Exception as e:
         logging.error(f"Ошибка отправки email: {e}")
+
+
+# === Проверка и отправка напоминаний согласно процессу ===
+def check_and_send_reminders(data, entry_id):
+    global sent_reminders
+
+    try:
+        # Определяем сеть (в нижнем регистре для сравнения)
+        network = data.get("Сеть", "").lower().strip()
+        if not network:
+            return
+
+        # Пропускаем "Лента" — по процессу не участвует
+        if "лента" in network:
+            logging.info("Пропускаем напоминания для Ленты — по процессу не участвует.")
+            return
+
+        # Пытаемся получить дату возврата из письма
+        return_date_str = data.get("Дата письма", "")[:10]  # Берём только YYYY-MM-DD
+        try:
+            return_date = datetime.strptime(return_date_str, "%Y-%m-%d").date()
+        except:
+            logging.warning(f"Не удалось определить дату возврата из письма: {return_date_str}")
+            return
+
+        today = datetime.today().date()
+        current_time = datetime.now().strftime("%H:%M")
+
+        # === Логика для X5 и Дистрибьюторов ===
+        if "x5" in network or "дистр" in network:
+            # Напоминание в 12:00 в день возврата
+            if today == return_date and current_time == "12:00":
+                reminder_key = (entry_id, "due_day_1200")
+                if reminder_key not in sent_reminders:
+                    subject = f"📅 Напоминание ({network.upper()}): предоставить данные для пропуска на РЦ"
+                    body = (
+                        f"Дата возврата: {return_date_str}\n"
+                        f"Сеть: {data.get('Сеть', '')}\n"
+                        f"РЦ: {data.get('РЦ', '')}\n\n"
+                        f"Напоминаем предоставить данные для оформления пропуска.\n"
+                        f"[Автоматическое уведомление]"
+                    )
+                    recipients = REMINDER_RECIPIENTS.get("x5" if "x5" in network else "дистры")
+                    send_email(subject, body, recipients)
+                    sent_reminders.add(reminder_key)
+                    logging.info(f"✅ Отправлено напоминание для {network} в день возврата → {recipients}")
+
+            # Проверка отправки пропуска — раз в час в день возврата
+            if today == return_date and int(current_time[3:]) == 0:  # Каждый час:XX, где XX=00
+                reminder_key = (entry_id, f"hourly_check_{current_time[:2]}")
+                if reminder_key not in sent_reminders:
+                    subject = f"🔍 Проверка ({network.upper()}): отправлен ли пропуск на РЦ?"
+                    body = (
+                        f"Дата возврата: {return_date_str}\n"
+                        f"Сеть: {data.get('Сеть', '')}\n"
+                        f"РЦ: {data.get('РЦ', '')}\n\n"
+                        f"Пожалуйста, подтвердите, что пропуск на РЦ оформлен и отправлен.\n"
+                        f"[Автоматическое уведомление]"
+                    )
+                    recipients = REMINDER_RECIPIENTS.get("x5" if "x5" in network else "дистры")
+                    send_email(subject, body, recipients)
+                    sent_reminders.add(reminder_key)
+                    logging.info(f"✅ Отправлена проверка пропуска для {network} → {recipients}")
+
+        # === Логика для Тандер ===
+        elif "тандер" in network:
+            # Определяем "канун" — день перед возвратом
+            due_eve = return_date - timedelta(days=1)
+
+            # Если возврат в понедельник — напоминать в пятницу
+            if return_date.weekday() == 0:  # Понедельник
+                due_eve = return_date - timedelta(days=3)
+
+            # Напоминание в 14:00 в канун дня возврата
+            if today == due_eve and current_time == "14:00":
+                reminder_key = (entry_id, "due_eve_1400")
+                if reminder_key not in sent_reminders:
+                    subject = "🚛 Напоминание (ТАНДЕР): предоставить данные для пропуска на РЦ"
+                    body = (
+                        f"Дата возврата: {return_date_str}\n"
+                        f"Сеть: {data.get('Сеть', '')}\n"
+                        f"РЦ: {data.get('РЦ', '')}\n\n"
+                        f"Напоминаем предоставить данные для оформления пропуска НАКАНУНЕ возврата.\n"
+                        f"[Автоматическое уведомление]"
+                    )
+                    recipients = REMINDER_RECIPIENTS.get("тандер")
+                    send_email(subject, body, recipients)
+                    sent_reminders.add(reminder_key)
+                    logging.info(f"✅ Отправлено напоминание для Тандер (накануне) → {recipients}")
+
+    except Exception as e:
+        logging.error(f"Ошибка при отправке напоминания: {e}")
 
 
 # === Запись в Excel: вертикальный режим ===
@@ -196,7 +302,7 @@ def write_horizontal_to_excel(data, sheet_name, excel_file):
     try:
         df_new = pd.DataFrame([data])
 
-        if not os.path.exists(excel_file):
+        if not os.path.exists(EXCEL_FILE):
             df_new.to_excel(excel_file, sheet_name=sheet_name, index=False)
             logging.info(f"✅ Создан новый файл Excel (горизонтальный): {excel_file}")
         else:
@@ -236,7 +342,6 @@ def handle_mail(item, processed_ids):
             save_processed_ids(processed_ids)
             return
 
-        # ✅ Проверка темы БЕЗ УЧЁТА РЕГИСТРА
         if not subject or SEARCH_SUBJECT.lower() not in str(subject).lower():
             logging.debug(f"❌ Пропускаем: тема не содержит '{SEARCH_SUBJECT}' (текущая тема: '{subject}')")
             return
@@ -261,28 +366,8 @@ def handle_mail(item, processed_ids):
             write_horizontal_to_excel(data, SHEET_NAME, EXCEL_FILE)
             logging.info("✅ Записано горизонтально в Excel")
 
-        if data.get("Сеть", "").lower() == "тандер":
-            try:
-                today_date = datetime.today()
-                notify_days = [today_date]
-
-                if today_date.weekday() == 4:  # пятница
-                    notify_days = [today_date + timedelta(days=i) for i in [1, 2, 3]]
-
-                for notify_day in notify_days:
-                    subject_msg = f"Напоминание: заказать пропуск на РЦ для Тандер"
-                    body_msg = (
-                        f"Дата возврата: {data['Дата письма']}\n"
-                        f"Сеть: {data['Сеть']}\n"
-                        f"РЦ: {data['РЦ']}\n"
-                        f"Тягач: {data.get('Тягач','')}\n"
-                        f"Прицеп: {data.get('Прицеп','')}\n"
-                        f"Не забудьте заказать пропуск на РЦ!"
-                    )
-                    send_email(subject_msg, body_msg, EMAIL_TO, EMAIL_CC)
-                    logging.info("✅ Отправлено уведомление для Тандер")
-            except Exception as e:
-                logging.error(f"Ошибка при отправке уведомления: {e}")
+        # ✅ Проверяем и отправляем напоминания согласно процессу
+        check_and_send_reminders(data, entry_id)
 
         processed_ids.add(entry_id)
         save_processed_ids(processed_ids)
@@ -315,13 +400,12 @@ def monitor_inbox():
         logging.info(f"📂 Папка: {OUTLOOK_FOLDER}")
         logging.info(f"📬 Ищем письма с темой (без учёта регистра): '{SEARCH_SUBJECT}'")
 
-        # ✅ Дадим Outlook время на синхронизацию
         time.sleep(5)
 
         while True:
             try:
                 today = datetime.today().date()
-                min_date = today - timedelta(days=1)  # ✅ Включаем вчерашние письма на всякий случай
+                min_date = today - timedelta(days=7)  # Смотрим письма за последнюю неделю
 
                 messages = folder.Items
                 messages.Sort("[ReceivedTime]", True)
@@ -335,26 +419,16 @@ def monitor_inbox():
                         subject = getattr(msg, 'Subject', 'Без темы')
                         received_time = getattr(msg, 'ReceivedTime', None)
 
-                        logging.debug(f"DEBUG: Объект — Тема: '{subject}', Class: {msg_class}, Дата: {received_time}")
-
-                        # Пропускаем не MailItem
                         if msg_class != 43:
-                            logging.debug(" → Пропускаем: не MailItem (Class != 43)")
                             continue
 
-                        # Пропускаем без даты
                         if not received_time:
-                            logging.debug(" → Пропускаем: нет ReceivedTime")
                             continue
 
-                        # Пропускаем слишком старые
                         if received_time.date() < min_date:
-                            logging.debug(" → Пропускаем: письмо старше вчерашнего дня")
                             break
 
-                        # Добавляем в список
                         msg_list.append(msg)
-                        logging.debug(f" → ✅ Подходит для обработки: {subject}")
 
                     except Exception as e:
                         logging.error(f"Ошибка при анализе письма: {e}")
