@@ -328,7 +328,7 @@ def check_and_send_reminders(data, entry_id):
                 if not has_driver_in_table:
                     key = (entry_id, "tander_need_data")
                     if key not in sent_reminders:
-                        subject = f"🚛 ТАНДЕР: срочно предоставьте данные водителя на РЦ {rc_from_email}"
+                        subject = f"ТАНДЕР: срочно предоставьте данные водителя на РЦ {rc_from_email}"
                         body = (
                             f"Дата возврата: {return_date.strftime('%d.%m.%Y')}\n"
                             f"РЦ: {rc_from_email}\n\n"
