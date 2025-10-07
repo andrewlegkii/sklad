@@ -24,13 +24,15 @@ TABLE_FILE = os.path.join(BASE_PATH, "Екатеринбург - учет обо
 # === Настройка логирования ===
 log_file = os.path.join(BASE_PATH, "script.log")
 logging.basicConfig(
-    level=logging.DEBUG, # DEBUG для подробного логгирования
+    level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
         logging.FileHandler(log_file, encoding='utf-8'),
         logging.StreamHandler(sys.stdout)
     ]
 )
+
+SUPPORT_CONTACT = "andrei.legkii@nestle.ru"
 
 # === Настройки ===
 OUTLOOK_FOLDER = "Inbox"
@@ -39,13 +41,13 @@ EXCEL_FILE = os.path.join(BASE_PATH, "возврат_поддонов.xlsx")
 PROCESSED_IDS_FILE = os.path.join(BASE_PATH, "processed_ids.txt")
 SHEET_NAME = "Данные"
 
-WRITE_MODE = "horizontal" # или "vertical"
+WRITE_MODE = "horizontal"  # или "vertical"
 
 # === Получатели напоминаний ===
 REMINDER_RECIPIENTS = {
-    "x5": ["skoppss@yandex.ru"], # Пример, заменить на реальные
-    "тандер": ["skoppss@yandex.ru"],
-    "дистры": ["skoppss@yandex.ru"]
+    "x5": ["dma@line7.ru", "slon07@line7.ru", "rudcekb@nestlesoft.net"],
+    "тандер": ["rudcekb@nestlesoft.net"],
+    "дистры": ["rudcekb@nestlesoft.net"]
 }
 
 # === Глобальные переменные ===
@@ -53,6 +55,15 @@ _table_cache = None
 _table_cache_time = None
 sent_reminders = set()
 _processed_ids = set()
+
+
+# === Установка заголовка консоли ===
+def set_console_title(title):
+    try:
+        import ctypes
+        ctypes.windll.kernel32.SetConsoleTitleW(title)
+    except Exception as e:
+        logging.debug(f"Не удалось установить заголовок консоли: {e}")
 
 
 # === Загрузка уже обработанных ID из файла ===
@@ -98,10 +109,10 @@ def parse_email(body, received_time):
         # Инициализируем дату по умолчанию как дату получения
         default_date_str = received_time.strftime("%Y-%m-%d %H:%M")
         data = {
-            "Дата письма": default_date_str, # По умолчанию - дата получения
-            "Дата возврата из письма": None, # Новое поле для даты из тела
+            "Дата письма": default_date_str,  # По умолчанию - дата получения
+            "Дата возврата из письма": None,  # Новое поле для даты из тела
             "Сеть": "",
-            "РЦ": "",
+            "РЦ": "",  # <<< Сохраняем РЦ в точности как в письме
             "Тягач": "",
             "Прицеп": "",
             "ФИО водителя": "",
@@ -124,7 +135,7 @@ def parse_email(body, received_time):
                 # Пример: "Дата 11.10.2025 возврат"
                 parts = line.split(" ")
                 if len(parts) >= 2:
-                    date_part = parts[1] # Берем второй элемент ("11.10.2025")
+                    date_part = parts[1]  # Берем второй элемент ("11.10.2025")
                     try:
                         # Преобразуем в объект date
                         dt_obj = datetime.strptime(date_part, "%d.%m.%Y").date()
@@ -142,7 +153,8 @@ def parse_email(body, received_time):
                 if len(parts) >= 2:
                     data["Сеть"] = parts[1]
                 if len(parts) >= 3:
-                    data["РЦ"] = parts[2].replace("РЦ", "").strip()
+                    # <<< СОХРАНЯЕМ РЦ КАК ЕСТЬ, БЕЗ ОБРЕЗАНИЯ "РЦ" >>>
+                    data["РЦ"] = parts[2].strip()  # parts[2] уже содержит "РЦ Тюмень"
             elif line.startswith("Тягач"):
                 data["Тягач"] = line.split(":", 1)[1].strip() if ":" in line else ""
             elif line.startswith("Прицеп"):
@@ -188,7 +200,7 @@ def send_email(subject, body, to, cc=None):
         logging.error(f"Ошибка отправки email: {e}")
 
 
-# === 🔹 НОВАЯ ФУНКЦИЯ: Обновление строки в таблице ===
+# === 🔹 НОВАЯ ФУНКЦИЯ: Обновление строки в таблице (БЕЗ проверки по поставщику) ===
 def update_table_row(data, target_date, target_rc):
     """
     Обновляет строку в TABLE_FILE (Екатеринбург - учет оборота поддонов.xlsx)
@@ -226,6 +238,7 @@ def update_table_row(data, target_date, target_rc):
         rc_col_idx = None
         driver_col_idx = None
         tractor_col_idx = None
+        # supplier_col_idx = None  # УБРАНО
 
         for i, header_text in enumerate(headers):
             # Столбец даты
@@ -240,6 +253,7 @@ def update_table_row(data, target_date, target_rc):
             # Столбец номера а/м
             elif header_text.lower() == "номер ам":
                 tractor_col_idx = i + 1
+            # supplier_col_idx не ищем  # УБРАНО
 
         logging.debug(f"📊 update_table_row: Индексы столбцов: дата={date_col_idx}, РЦ={rc_col_idx}, водитель={driver_col_idx}, номер ам={tractor_col_idx}")
 
@@ -257,7 +271,7 @@ def update_table_row(data, target_date, target_rc):
             logging.error(f"❌ update_table_row: Не найдены обязательные столбцы в таблице: {', '.join(missing_cols)}")
             return False
 
-        # Ищем строку с совпадающей датой и РЦ
+        # === 🔍 Ищем строку с совпадающей датой и РЦ ===
         found_row = None
         logging.debug(f"🔎 update_table_row: Начинаем поиск строки с датой {target_date} и РЦ '{target_rc}'...")
         for row_num, row in enumerate(sheet.iter_rows(min_row=2, values_only=True), start=2):
@@ -267,19 +281,17 @@ def update_table_row(data, target_date, target_rc):
                 continue
 
             try:
-                # Пытаемся преобразовать дату из ячейки разных форматов
                 if isinstance(cell_date_value, str):
                     if "." in cell_date_value:
                         cell_date_obj = datetime.strptime(cell_date_value, "%d.%m.%Y").date()
                     else:
                         # Попробуем другой формат, если стандартный не подошёл
-                        cell_date_obj = datetime.strptime(cell_date_value, "%Y-%m-%d").date()
+                         cell_date_obj = datetime.strptime(cell_date_value, "%Y-%m-%d").date()
                 else:
-                    # Предполагаем, что это объект datetime/date
-                    cell_date_obj = cell_date_value.date() if hasattr(cell_date_value, 'date') else cell_date_value
+                    cell_date_obj = cell_date_value.date()
             except Exception as date_parse_error:
-                logging.debug(f"  ⚠️ update_table_row: Не удалось распарсить дату '{cell_date_value}' в строке {row_num}: {date_parse_error}")
-                continue # Пропускаем, если не удалось преобразовать дату
+                 logging.debug(f"  ⚠️ update_table_row: Не удалось распарсить дату '{cell_date_value}' в строке {row_num}: {date_parse_error}")
+                 continue  # Пропускаем, если не удалось преобразовать дату
 
             if cell_date_obj != target_date:
                 continue
@@ -289,7 +301,7 @@ def update_table_row(data, target_date, target_rc):
             if cell_rc_value is not None and str(cell_rc_value).strip() == target_rc:
                 found_row = row_num
                 logging.debug(f"  ✅ update_table_row: Найдена строка {found_row} с совпадающей датой и РЦ.")
-                break # Нашли нужную строку
+                break  # Нашли нужную строку
 
         if found_row is None:
             logging.info(f"ℹ️ update_table_row: Строка с датой {target_date} и РЦ '{target_rc}' не найдена в таблице.")
@@ -308,7 +320,7 @@ def update_table_row(data, target_date, target_rc):
                 updated = True
                 logging.info(f"✅ update_table_row: Обновлён водитель в строке {found_row}: '{driver_from_email}'")
             else:
-                logging.debug(f"ℹ️ update_table_row: Водитель в строке {found_row} уже заполнен ('{current_driver}'). Пропускаем.")
+                 logging.debug(f"ℹ️ update_table_row: Водитель в строке {found_row} уже заполнен ('{current_driver}'). Пропускаем.")
 
         # Обновляем номер а/м (тягач)
         tractor_cell = sheet.cell(row=found_row, column=tractor_col_idx)
@@ -320,7 +332,7 @@ def update_table_row(data, target_date, target_rc):
                 updated = True
                 logging.info(f"✅ update_table_row: Обновлён номер а/м в строке {found_row}: '{tractor_from_email}'")
             else:
-                logging.debug(f"ℹ️ update_table_row: Номер а/м в строке {found_row} уже заполнен ('{current_tractor}'). Пропускаем.")
+                 logging.debug(f"ℹ️ update_table_row: Номер а/м в строке {found_row} уже заполнен ('{current_tractor}'). Пропускаем.")
 
         if updated:
             try:
@@ -328,10 +340,10 @@ def update_table_row(data, target_date, target_rc):
                 logging.info(f"💾 update_table_row: Таблица успешно обновлена: строка {found_row}")
             except PermissionError:
                 logging.error(f"❌ update_table_row: Нет доступа к файлу таблицы. Возможно, он открыт в Excel: {TABLE_FILE}")
-                return False # Считаем, что неудача, если не смогли сохранить
+                return False  # Считаем, что неудача, если не смогли сохранить
             except Exception as save_error:
-                logging.error(f"❌ update_table_row: Ошибка сохранения таблицы: {save_error}")
-                return False
+                 logging.error(f"❌ update_table_row: Ошибка сохранения таблицы: {save_error}")
+                 return False
         else:
             logging.info(f"ℹ️ update_table_row: Строка {found_row} уже содержит данные водителя/тягача, обновление не требуется.")
 
@@ -424,7 +436,7 @@ def check_and_send_reminders(data, entry_id):
                 reminder_date = return_date_obj - timedelta(days=1)
 
             if today == reminder_date and current_time == "14:00":
-                if not has_driver_in_table_simulation:
+                if not has_driver_in_table_simulation:  # Имитация отсутствия водителя
                     key = (entry_id, "tander_need_data")
                     if key not in sent_reminders:
                         subject = f"ТАНДЕР: срочно предоставьте данные водителя на РЦ {rc_from_email}"
@@ -669,6 +681,12 @@ def monitor_inbox():
 # === Запуск ===
 if __name__ == "__main__":
     try:
+        set_console_title("📦 Система учета возврата поддонов")
+        logging.info("=" * 50)
+        logging.info("  📦 Система учета возврата поддонов")
+        logging.info(f"  📞 Поддержка: {SUPPORT_CONTACT}")
+        logging.info("=" * 50)
+        logging.info("")
         monitor_inbox()
     except Exception as e:
         logging.error(f"❌ Критическая ошибка: {e}")
