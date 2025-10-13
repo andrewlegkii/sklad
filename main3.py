@@ -32,8 +32,6 @@ logging.basicConfig(
     ]
 )
 
-SUPPORT_CONTACT = "andrei.legkii@nestle.ru"
-
 # === Настройки ===
 OUTLOOK_FOLDER = "Inbox"
 SEARCH_SUBJECT = "Возврат поддонов из сетей"
@@ -45,9 +43,9 @@ WRITE_MODE = "horizontal"  # или "vertical"
 
 # === Получатели напоминаний ===
 REMINDER_RECIPIENTS = {
-    "x5": ["dma@line7.ru", "slon07@line7.ru", "rudcekb@nestlesoft.net"],
-    "тандер": ["rudcekb@nestlesoft.net"],
-    "дистры": ["rudcekb@nestlesoft.net"]
+    "x5": ["skoppss@yandex.ru"],
+    "тандер": ["skoppss@yandex.ru"],
+    "дистры": ["skoppss@yandex.ru"]
 }
 
 # === Глобальные переменные ===
@@ -55,15 +53,6 @@ _table_cache = None
 _table_cache_time = None
 sent_reminders = set()
 _processed_ids = set()
-
-
-# === Установка заголовка консоли ===
-def set_console_title(title):
-    try:
-        import ctypes
-        ctypes.windll.kernel32.SetConsoleTitleW(title)
-    except Exception as e:
-        logging.debug(f"Не удалось установить заголовок консоли: {e}")
 
 
 # === Загрузка уже обработанных ID из файла ===
@@ -112,7 +101,7 @@ def parse_email(body, received_time):
             "Дата письма": default_date_str,  # По умолчанию - дата получения
             "Дата возврата из письма": None,  # Новое поле для даты из тела
             "Сеть": "",
-            "РЦ": "",  # <<< Сохраняем РЦ в точности как в письме
+            "РЦ": "",
             "Тягач": "",
             "Прицеп": "",
             "ФИО водителя": "",
@@ -153,8 +142,7 @@ def parse_email(body, received_time):
                 if len(parts) >= 2:
                     data["Сеть"] = parts[1]
                 if len(parts) >= 3:
-                    # <<< СОХРАНЯЕМ РЦ КАК ЕСТЬ, БЕЗ ОБРЕЗАНИЯ "РЦ" >>>
-                    data["РЦ"] = parts[2].strip()  # parts[2] уже содержит "РЦ Тюмень"
+                    data["РЦ"] = parts[2].replace("РЦ", "").strip()
             elif line.startswith("Тягач"):
                 data["Тягач"] = line.split(":", 1)[1].strip() if ":" in line else ""
             elif line.startswith("Прицеп"):
@@ -291,7 +279,7 @@ def update_table_row(data, target_date, target_rc):
                     cell_date_obj = cell_date_value.date()
             except Exception as date_parse_error:
                  logging.debug(f"  ⚠️ update_table_row: Не удалось распарсить дату '{cell_date_value}' в строке {row_num}: {date_parse_error}")
-                 continue  # Пропускаем, если не удалось преобразовать дату
+                 continue # Пропускаем, если не удалось преобразовать дату
 
             if cell_date_obj != target_date:
                 continue
@@ -301,7 +289,7 @@ def update_table_row(data, target_date, target_rc):
             if cell_rc_value is not None and str(cell_rc_value).strip() == target_rc:
                 found_row = row_num
                 logging.debug(f"  ✅ update_table_row: Найдена строка {found_row} с совпадающей датой и РЦ.")
-                break  # Нашли нужную строку
+                break # Нашли нужную строку
 
         if found_row is None:
             logging.info(f"ℹ️ update_table_row: Строка с датой {target_date} и РЦ '{target_rc}' не найдена в таблице.")
@@ -340,7 +328,7 @@ def update_table_row(data, target_date, target_rc):
                 logging.info(f"💾 update_table_row: Таблица успешно обновлена: строка {found_row}")
             except PermissionError:
                 logging.error(f"❌ update_table_row: Нет доступа к файлу таблицы. Возможно, он открыт в Excel: {TABLE_FILE}")
-                return False  # Считаем, что неудача, если не смогли сохранить
+                return False # Считаем, что неудача, если не смогли сохранить
             except Exception as save_error:
                  logging.error(f"❌ update_table_row: Ошибка сохранения таблицы: {save_error}")
                  return False
@@ -354,26 +342,24 @@ def update_table_row(data, target_date, target_rc):
         return False
 
 
-# === Проверка и отправка напоминаний согласно процессу ===
+# === 🔹 НОВАЯ ФУНКЦИЯ: Проверка и отправка напоминаний по процессу ===
 def check_and_send_reminders(data, entry_id):
+    """
+    Проверяет таблицу Екатеринбург и отправляет напоминания:
+    - X5: в 12:00 в день возврата
+    - Тандер: в 14:00 накануне (с учётом выходных)
+    - Дистры.: в 13:00 в день возврата
+    """
     global sent_reminders
 
     try:
-        network = data.get("Сеть", "").lower().strip()
-        if not network:
-            return
-
-        if "лента" in network:
-            logging.info("Пропускаем Ленту — по процессу не участвует.")
-            return
-
         # === Используем дату из письма для напоминаний ===
-        return_date_obj = data.get("Дата возврата из письма")
-        if not return_date_obj:
+        return_date_str = data.get("Дата возврата из письма")
+        if not return_date_str:
             # fallback на дату из "Дата письма" если не нашли специальную
             try:
-                return_date_str = data.get("Дата письма", "")[:10]
-                return_date_obj = datetime.strptime(return_date_str, "%Y-%m-%d").date()
+                fallback_date_str = data.get("Дата письма", "")[:10]
+                return_date_str = datetime.strptime(fallback_date_str, "%Y-%m-%d").date()
             except:
                 logging.warning(f"Не удалось определить дату возврата для напоминаний: {data.get('Дата письма', '')}")
                 return
@@ -382,79 +368,172 @@ def check_and_send_reminders(data, entry_id):
         today = datetime.today().date()
         current_time = datetime.now().strftime("%H:%M")
 
-        # === Загружаем данные из таблицы для проверки наличия водителя ===
-        # Для простоты, предположим, что если мы дошли до этой точки, строка существует.
-        # В реальности, можно было бы сделать повторную проверку, но для демонстрации логики отправки напоминаний этого достаточно.
-        # Здесь мы просто имитируем проверку на основе данных из письма.
-        # В реальной жизни, нужно было бы перечитать таблицу и найти конкретную строку.
-        # Для упрощения, предположим, что водитель отсутствует, если ФИО пустое.
-        has_driver_in_table_simulation = bool(data.get("ФИО водителя", "").strip())
+        # === 🔍 Читаем таблицу и ищем строки с совпадающей датой и РЦ ===
+        if not os.path.exists(TABLE_FILE):
+            logging.warning(f"Файл таблицы не найден для проверки напоминаний: {TABLE_FILE}")
+            return
 
-        # === X5 и Дистрибьюторы ===
-        if "x5" in network or "дистр" in network:
-            if today == return_date_obj:
-                if current_time == "12:00" and not has_driver_in_table_simulation:
-                    key = (entry_id, "need_data")
+        try:
+            df = pd.read_excel(TABLE_FILE, sheet_name="приход", header=0)
+            df.columns = df.columns.str.strip()
+
+            # Найдем индексы нужных столбцов
+            date_col_idx = None
+            rc_col_idx = None
+            driver_col_idx = None
+            tractor_col_idx = None
+
+            for i, col_name in enumerate(df.columns):
+                if col_name.lower() == "дата":
+                    date_col_idx = i
+                elif "рц" in col_name.lower() and "(выберите из списка)" in col_name.lower():
+                    rc_col_idx = i
+                elif "водитель" in col_name.lower() and "фамилия" in col_name.lower():
+                    driver_col_idx = i
+                elif col_name.lower() == "номер ам":
+                    tractor_col_idx = i
+
+            if date_col_idx is None or rc_col_idx is None:
+                logging.error("❌ check_and_send_reminders: Не найдены столбцы 'дата' или 'РЦ (выберите из списка)'")
+                return
+
+            # Ищем строки с совпадающей датой и РЦ
+            matching_rows = df[
+                (df.iloc[:, date_col_idx] == return_date_str) &
+                (df.iloc[:, rc_col_idx].astype(str).str.strip() == rc_from_email)
+            ]
+
+            if matching_rows.empty:
+                logging.info(f"ℹ️ check_and_send_reminders: Строки с датой {return_date_str} и РЦ '{rc_from_email}' не найдены в таблице.")
+                return
+
+            # Берем первую найденную строку для проверки
+            row = matching_rows.iloc[0]
+            row_index = matching_rows.index[0] + 2  # +2 потому что DataFrame индекс 0 = строка 2 в Excel
+
+            # Проверяем, заполнены ли ФИО и номер а/м
+            driver_value = str(row.iloc[driver_col_idx]).strip() if driver_col_idx is not None and not pd.isna(row.iloc[driver_col_idx]) else ""
+            tractor_value = str(row.iloc[tractor_col_idx]).strip() if tractor_col_idx is not None and not pd.isna(row.iloc[tractor_col_idx]) else ""
+
+            has_driver_data = bool(driver_value and driver_value.lower() not in ("", "nan"))
+            has_tractor_data = bool(tractor_value and tractor_value.lower() not in ("", "nan"))
+
+            logging.debug(f"📊 check_and_send_reminders: Строка {row_index} | ФИО: '{driver_value}' | Номер а/м: '{tractor_value}'")
+
+        except Exception as e:
+            logging.error(f"❌ check_and_send_reminders: Ошибка чтения таблицы: {e}")
+            return
+
+        # === 🕒 Логика напоминаний по времени и клиенту ===
+
+        network = data.get("Сеть", "").lower().strip()
+        if not network:
+            return
+
+        if "лента" in network:
+            logging.info("Пропускаем Ленту — по процессу не участвует.")
+            return
+
+        # === X5 ===
+        if "x5" in network:
+            if today == return_date_str:
+                if current_time == "12:47" and not (has_driver_data and has_tractor_data):
+                    key = (entry_id, "x5_need_data_1200")
                     if key not in sent_reminders:
-                        subject = f"📅 Напоминание ({network.upper()}): предоставьте данные водителя на РЦ {rc_from_email}"
+                        subject = f"📅 Напоминание (X5): предоставьте данные водителя на РЦ {rc_from_email}"
                         body = (
-                            f"Дата возврата: {return_date_obj.strftime('%d.%m.%Y')}\n"
-                            f"Сеть: {data.get('Сеть', '')}\n"
-                            f"РЦ: {rc_from_email}\n\n"
-                            f"Напоминаем предоставить данные для оформления пропуска.\n"
-                            f"[Автоматическое уведомление]"
-                        )
-                        recipients = REMINDER_RECIPIENTS.get("x5" if "x5" in network else "дистры")
-                        send_email(subject, body, recipients)
-                        sent_reminders.add(key)
-                        logging.info(f"✅ Отправлено напоминание для {network} → {recipients}")
-
-                if current_time.endswith(":00") and has_driver_in_table_simulation:
-                    key = (entry_id, f"check_pass_{current_time}")
-                    if key not in sent_reminders:
-                        subject = f"🔍 Проверка ({network.upper()}): заказан ли пропуск на РЦ {rc_from_email}?"
-                        body = (
-                            f"Дата возврата: {return_date_obj.strftime('%d.%m.%Y')}\n"
-                            f"Сеть: {data.get('Сеть', '')}\n"
-                            f"РЦ: {rc_from_email}\n\n"
-                            f"Данные водителя есть в таблице — подтвердите оформление пропуска.\n"
-                            f"[Автоматическое уведомление]"
-                        )
-                        recipients = REMINDER_RECIPIENTS.get("x5" if "x5" in network else "дистры")
-                        send_email(subject, body, recipients)
-                        sent_reminders.add(key)
-                        logging.info(f"✅ Отправлена проверка пропуска для {network} → {recipients}")
-
-        # === Тандер ===
-        elif "тандер" in network:
-            if return_date_obj.weekday() in (5, 6, 0):  # Сб, Вс, Пн
-                days_back = (return_date_obj.weekday() - 4) % 7
-                if days_back == 0:
-                    days_back = 7
-                reminder_date = return_date_obj - timedelta(days=days_back)
-            else:
-                reminder_date = return_date_obj - timedelta(days=1)
-
-            if today == reminder_date and current_time == "14:00":
-                if not has_driver_in_table_simulation:  # Имитация отсутствия водителя
-                    key = (entry_id, "tander_need_data")
-                    if key not in sent_reminders:
-                        subject = f"ТАНДЕР: срочно предоставьте данные водителя на РЦ {rc_from_email}"
-                        body = (
-                            f"Дата возврата: {return_date_obj.strftime('%d.%m.%Y')}\n"
+                            f"Дата возврата: {return_date_str.strftime('%d.%m.%Y')}\n"
                             f"Сеть: {data.get('Сеть', '')}\n"
                             f"РЦ: {rc_from_email}\n\n"
                             f"Данные водителя отсутствуют в таблице учёта.\n"
                             f"[Автоматическое уведомление]"
                         )
-                        recipients = REMINDER_RECIPIENTS["тандер"]
+                        recipients = REMINDER_RECIPIENTS.get("x5")
+                        send_email(subject, body, recipients)
+                        sent_reminders.add(key)
+                        logging.info(f"✅ Отправлено напоминание для X5 → {recipients}")
+
+                if current_time.endswith(":00") and (has_driver_data and has_tractor_data):
+                    key = (entry_id, f"x5_check_pass_{current_time}")
+                    if key not in sent_reminders:
+                        subject = f"🔍 Проверка (X5): заказан ли пропуск на РЦ {rc_from_email}?"
+                        body = (
+                            f"Дата возврата: {return_date_str.strftime('%d.%m.%Y')}\n"
+                            f"Сеть: {data.get('Сеть', '')}\n"
+                            f"РЦ: {rc_from_email}\n\n"
+                            f"Данные водителя есть в таблице — подтвердите оформление пропуска.\n"
+                            f"[Автоматическое уведомление]"
+                        )
+                        recipients = REMINDER_RECIPIENTS.get("x5")
+                        send_email(subject, body, recipients)
+                        sent_reminders.add(key)
+                        logging.info(f"✅ Отправлена проверка пропуска для X5 → {recipients}")
+
+        # === Тандер ===
+        elif "тандер" in network:
+            # Определяем день напоминания (канун)
+            if return_date_str.weekday() in (5, 6, 0):  # Сб, Вс, Пн
+                days_back = (return_date_str.weekday() - 4) % 7
+                if days_back == 0:
+                    days_back = 7
+                reminder_date = return_date_str - timedelta(days=days_back)
+            else:
+                reminder_date = return_date_str - timedelta(days=1)
+
+            if today == reminder_date and current_time == "14:00":
+                if not (has_driver_data and has_tractor_data):
+                    key = (entry_id, "tander_need_data_1400")
+                    if key not in sent_reminders:
+                        subject = f"🚛 ТАНДЕР: срочно предоставьте данные водителя на РЦ {rc_from_email}"
+                        body = (
+                            f"Дата возврата: {return_date_str.strftime('%d.%m.%Y')}\n"
+                            f"Сеть: {data.get('Сеть', '')}\n"
+                            f"РЦ: {rc_from_email}\n\n"
+                            f"Данные водителя отсутствуют в таблице учёта.\n"
+                            f"[Автоматическое уведомление]"
+                        )
+                        recipients = REMINDER_RECIPIENTS.get("тандер")
                         send_email(subject, body, recipients)
                         sent_reminders.add(key)
                         logging.info(f"✅ Отправлено напоминание для Тандер → {recipients}")
 
+        # === Дистры. ===
+        elif "дистр" in network:
+            if today == return_date_str:
+                if current_time == "13:00" and not (has_driver_data and has_tractor_data):
+                    key = (entry_id, "distr_need_data_1300")
+                    if key not in sent_reminders:
+                        subject = f"📦 Напоминание (Дистры.): предоставьте данные водителя на РЦ {rc_from_email}"
+                        body = (
+                            f"Дата возврата: {return_date_str.strftime('%d.%m.%Y')}\n"
+                            f"Сеть: {data.get('Сеть', '')}\n"
+                            f"РЦ: {rc_from_email}\n\n"
+                            f"Данные водителя отсутствуют в таблице учёта.\n"
+                            f"[Автоматическое уведомление]"
+                        )
+                        recipients = REMINDER_RECIPIENTS.get("дистры")
+                        send_email(subject, body, recipients)
+                        sent_reminders.add(key)
+                        logging.info(f"✅ Отправлено напоминание для Дистры. → {recipients}")
+
+                if current_time.endswith(":00") and (has_driver_data and has_tractor_data):
+                    key = (entry_id, f"distr_check_pass_{current_time}")
+                    if key not in sent_reminders:
+                        subject = f"🔍 Проверка (Дистры.): заказан ли пропуск на РЦ {rc_from_email}?"
+                        body = (
+                            f"Дата возврата: {return_date_str.strftime('%d.%m.%Y')}\n"
+                            f"Сеть: {data.get('Сеть', '')}\n"
+                            f"РЦ: {rc_from_email}\n\n"
+                            f"Данные водителя есть в таблице — подтвердите оформление пропуска.\n"
+                            f"[Автоматическое уведомление]"
+                        )
+                        recipients = REMINDER_RECIPIENTS.get("дистры")
+                        send_email(subject, body, recipients)
+                        sent_reminders.add(key)
+                        logging.info(f"✅ Отправлена проверка пропуска для Дистры. → {recipients}")
+
     except Exception as e:
         logging.error(f"Ошибка в check_and_send_reminders: {e}")
-
 
 # === Запись в Excel: вертикальный режим ===
 def write_vertical_to_excel(data, sheet_name, excel_file):
@@ -523,7 +602,6 @@ def write_horizontal_to_excel(data, sheet_name, excel_file):
 
 # === Обработка письма ===
 def handle_mail(item, processed_ids):
-    global _processed_ids
     try:
         entry_id = item.EntryID
         subject = item.Subject
@@ -681,12 +759,6 @@ def monitor_inbox():
 # === Запуск ===
 if __name__ == "__main__":
     try:
-        set_console_title("📦 Система учета возврата поддонов")
-        logging.info("=" * 50)
-        logging.info("  📦 Система учета возврата поддонов")
-        logging.info(f"  📞 Поддержка: {SUPPORT_CONTACT}")
-        logging.info("=" * 50)
-        logging.info("")
         monitor_inbox()
     except Exception as e:
         logging.error(f"❌ Критическая ошибка: {e}")
