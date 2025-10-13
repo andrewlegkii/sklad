@@ -19,7 +19,7 @@ def get_base_path():
 BASE_PATH = get_base_path()
 
 # === ПУТЬ К ТАБЛИЦЕ С ДАННЫМИ ===
-TABLE_FILE = r"C:\Users\RULegkiiAn.NESTLESOFT\OneDrive - Nestle Russia & Eurasia\RU DO Warehouses - оборот поддонов\Екатеринбург - учет оборота поддонов.xlsx"
+TABLE_FILE = r"C:\Users\RUIurovskikhNi.NESTLESOFT\OneDrive - Nestle Russia & Eurasia\RU DO Warehouses - оборот поддонов\Екатеринбург - учет оборота поддонов.xlsx"
 
 # === Логирование ===
 log_file = os.path.join(BASE_PATH, "script.log")
@@ -48,7 +48,7 @@ REMINDER_RECIPIENTS = {
     "Тандер": ["rudcekb@nestlesoft.net"],
     "дистры": ["rudcekb@nestlesoft.net"]
 }
-SENDER_EMAIL = "andrei.legkii@nestle.ru"  # Замените на нужный вам адрес
+SENDER_EMAIL = "Nikolai.Iurovskikh@nestle.ru"  # Замените на нужный вам адрес
 
 # === ФЛАГ ТЕСТИРОВАНИЯ (поставьте False для продакшена) ===
 TEST_MODE = False  # True — для тестирования, False — для реальной работы
@@ -360,14 +360,14 @@ def check_reminders_from_table():
             logging.debug(f"📋 Строка {row_index}: дата={parsed_date}, РЦ={rc}, поставщик='{supplier}', водитель={'да' if has_driver else 'нет'}, тягач={'да' if has_tractor else 'нет'}")
 
             # === X5 и Дистры: напоминание в 12:00 по МСК в день возврата ===
-            if ("x5" in supplier_lower or "х5" in supplier_lower or "дистр" in supplier_lower) and today_msk == parsed_date:
+            if ("Х5" in supplier_lower or "х5" in supplier_lower or "дистр" in supplier_lower) and today_msk == parsed_date:
                 logging.info(f"✅ X5/Дистры: строка {row_index} подходит по дате и поставщику")
-                if TEST_MODE and current_time_msk.hour == TEST_HOUR or (not TEST_MODE and time(12, 0) <= current_time_msk < time(12, 1)):
+                if TEST_MODE and current_time_msk.hour == TEST_HOUR or (not TEST_MODE and time(12, 0) <= current_time_msk < time(12, 2)):
                     logging.info("⏰ Время 12:00 (или тестовое) — проверяю, нужно ли отправлять напоминание")
                     if not (has_driver and has_tractor):
                         key = (parsed_date.isoformat(), rc, "x5_distry_12h")
                         if key not in sent_reminders:
-                            net_name = "X5" if "x5" in supplier_lower or "х5" in supplier_lower else "Дистры"
+                            net_name = "Х5" if "Х5" in supplier_lower or "х5" in supplier_lower else "Дистры"
                             subject = f"📅 Напоминание ({net_name}): предоставьте данные водителя на РЦ {rc}"
                             body = (
                                 f"Дата возврата: {parsed_date.strftime('%d.%m.%Y')}\n"
@@ -377,7 +377,7 @@ def check_reminders_from_table():
                                 f"[Автоматическое уведомление]"
                             )
                             # === ВЫБОР ПОЛУЧАТЕЛЕЙ ПО СЕТИ ===
-                            recipients = REMINDER_RECIPIENTS.get("x5" if "x5" in supplier_lower or "х5" in supplier_lower else "дистры")
+                            recipients = REMINDER_RECIPIENTS.get("Х5" if "Х5" in supplier_lower or "х5" in supplier_lower else "дистры")
                             send_email(subject, body, recipients)
                             sent_reminders.add(key)
                             logging.info(f"✅ ✉️ ОТПРАВЛЕНО напоминание для {net_name} на {recipients} от {SENDER_EMAIL}")
@@ -403,7 +403,7 @@ def check_reminders_from_table():
 
                 if today_msk == reminder_date:
                     logging.info(f"✅ Сегодня день напоминания для Тандера (возврат {parsed_date}, напоминание {reminder_date})")
-                    if TEST_MODE and current_time_msk.hour == TEST_HOUR or (not TEST_MODE and time(14, 0) <= current_time_msk < time(14, 1)):
+                    if TEST_MODE and current_time_msk.hour == TEST_HOUR or (not TEST_MODE and time(14, 0) <= current_time_msk < time(14, 2)):
                         logging.info("⏰ Сейчас 14:00 (или тестовое) — проверяю необходимость отправки напоминания")
                         if not (has_driver and has_tractor):
                             key = (reminder_date.isoformat(), rc, "tander_14h")
